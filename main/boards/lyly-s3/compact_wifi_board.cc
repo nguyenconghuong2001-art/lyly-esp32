@@ -7,6 +7,7 @@
 #include "config.h"
 #include "lyly_music_config.h"
 #include "lyly_music_client.h"
+#include "music_mp3_streamer.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
@@ -178,6 +179,33 @@ void InitializeTools() {
         [](const PropertyList& properties) -> ReturnValue {
             auto title = properties["title"].value<std::string>();
             return LylyMusic::SearchSong(title);
+        }
+    );
+
+    // V2.3B: play an MP3 returned by the LYLY music server's search tool.
+    // Only a server song ID is accepted; this never fetches arbitrary URLs.
+    mcp.AddTool(
+        "self.lyly_music.play",
+        "Play a song on LYLY speaker. First call self.lyly_music.search, "
+        "then pass the returned song ID. Starts streaming asynchronously.",
+        PropertyList({
+            Property("id", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            const auto id = properties["id"].value<std::string>();
+            return MusicMp3Streamer::Instance().PlaySongId(id)
+                ? std::string(R"({"success":true,"status":"starting"})")
+                : std::string(R"({"success":false,"error":"Invalid song ID or player busy"})");
+        }
+    );
+
+    mcp.AddTool(
+        "self.lyly_music.stop",
+        "Stop LYLY music playback without discarding the assistant's voice messages.",
+        PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            MusicMp3Streamer::Instance().Stop();
+            return true;
         }
     );
 }

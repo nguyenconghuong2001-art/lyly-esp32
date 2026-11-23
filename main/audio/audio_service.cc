@@ -442,6 +442,18 @@ bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
     return true;
 }
 
+void AudioService::ClearMusicPlayback() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    for (auto it = audio_playback_queue_.begin(); it != audio_playback_queue_.end();) {
+        if ((*it)->type == kAudioTaskTypeMusicPlayback) {
+            it = audio_playback_queue_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    audio_queue_cv_.notify_all();
+}
+
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
