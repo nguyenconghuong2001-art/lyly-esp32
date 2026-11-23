@@ -10,7 +10,7 @@
 
 #include <esp_audio_dec_default.h>
 #include <esp_audio_simple_dec.h>
-#include <esp_audio_simple_dec_reg.h>
+#include <esp_audio_simple_dec_default.h>
 
 namespace {
 constexpr char TAG[] = "LYLY_MP3";
