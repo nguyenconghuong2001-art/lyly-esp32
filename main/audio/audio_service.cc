@@ -409,6 +409,39 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
     audio_queue_cv_.notify_all();
 }
 
+// V2.2 bridge: accept already-decoded mono PCM from a future music source.
+// This method does not fetch audio, decode MP3 or resample samples.
+bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
+    if (sample_rate <= 0 || pcm.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (service_stopped_ || codec_ == nullptr ||
+        sample_rate != codec_->output_sample_rate() ||
+        pcm.size() > static_cast<size_t>(sample_rate) * OPUS_FRAME_DURATION_MS / 1000 ||
+        !audio_decode_queue_.empty() ||
+        audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE ||
+        (xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
+        return false;
+    }
+
+    // A response from the assistant takes precedence over background music.
+    for (const auto& queued : audio_playback_queue_) {
+        if (queued->type != kAudioTaskTypeMusicPlayback) {
+            return false;
+        }
+    }
+
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeMusicPlayback;
+    task->pcm = std::move(pcm);
+    task->timestamp = 0; // Music is not a server-AEC packet.
+    audio_playback_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
@@ -416,6 +449,14 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
             audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
         } else {
             return false;
+        }
+    }
+    // Drop only queued music frames, never the assistant's decoded voice frames.
+    for (auto it = audio_playback_queue_.begin(); it != audio_playback_queue_.end();) {
+        if ((*it)->type == kAudioTaskTypeMusicPlayback) {
+            it = audio_playback_queue_.erase(it);
+        } else {
+            ++it;
         }
     }
     audio_decode_queue_.push_back(std::move(packet));

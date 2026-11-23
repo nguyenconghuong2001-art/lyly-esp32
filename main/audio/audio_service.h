@@ -64,6 +64,7 @@ enum AudioTaskType {
     kAudioTaskTypeEncodeToSendQueue,
     kAudioTaskTypeEncodeToTestingQueue,
     kAudioTaskTypeDecodeToPlaybackQueue,
+    kAudioTaskTypeMusicPlayback,
 };
 
 struct AudioTask {
@@ -103,6 +104,9 @@ public:
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
+    // 16-bit mono PCM, already resampled to the codec output rate.
+    // Nonblocking: caller handles false by retrying or skipping a frame.
+    bool QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate);
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
