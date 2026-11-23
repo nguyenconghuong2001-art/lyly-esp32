@@ -6,6 +6,7 @@
 #include "button.h"
 #include "config.h"
 #include "lyly_music_config.h"
+#include "lyly_music_client.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
@@ -150,13 +151,14 @@ private:
 
     // 物联网初始化，逐步迁移到 MCP 协议
 
+
 void InitializeTools() {
     // Keep existing lamp controller
     static LampController lamp(LAMP_GPIO);
 
-    // Register LYLY Music diagnostic tool
     auto& mcp = McpServer::GetInstance();
 
+    // Tool 1: Show LYLY music server
     mcp.AddTool(
         "self.lyly_music.server_info",
         "Return LYLY music server address. Does not play music.",
@@ -165,7 +167,21 @@ void InitializeTools() {
             return std::string(LylyMusic::SERVER_URL);
         }
     );
+
+    // Tool 2: Search for a song
+    mcp.AddTool(
+        "self.lyly_music.search",
+        "Search a song in LYLY Music Server. Return song information and audio URL. Does not play music.",
+        PropertyList({
+            Property("title", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto title = properties["title"].value<std::string>();
+            return LylyMusic::SearchSong(title);
+        }
+    );
 }
+
 
 public:
     LylyS3Board() :
