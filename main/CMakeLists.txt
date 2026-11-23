@@ -70,6 +70,7 @@ if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BUILTIN_ICON_FONT font_awesome_14_1)
 
 elseif(CONFIG_BOARD_TYPE_LYLY_S3)
+    list(APPEND SOURCES "audio/music_mp3_decoder.cc")
     set(BOARD_TYPE "lyly-s3")
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
     set(BUILTIN_ICON_FONT font_awesome_14_1)
