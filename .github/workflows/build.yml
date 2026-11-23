@@ -30,13 +30,14 @@ jobs:
       - id: list
         name: Get all variant list
         run: |
-          echo "all_variants=$(python scripts/release.py --list-boards --json)" >> $GITHUB_OUTPUT
+          echo "all_variants=$(python scripts/release.py --list-boards --json | jq -c '[.[] | select(.board == "lyly-s3")]')" >> "$GITHUB_OUTPUT"
 
       - id: select
         name: Select variants based on changes
         env:
           ALL_VARIANTS: ${{ steps.list.outputs.all_variants }}
         run: |
+
           EVENT_NAME="${{ github.event_name }}"
 
           # push 到 main 分支，编译全部变体
