@@ -149,9 +149,23 @@ private:
     }
 
     // 物联网初始化，逐步迁移到 MCP 协议
-    void InitializeTools() {
-        static LampController lamp(LAMP_GPIO);
-    }
+
+void InitializeTools() {
+    // Keep existing lamp controller
+    static LampController lamp(LAMP_GPIO);
+
+    // Register LYLY Music diagnostic tool
+    auto& mcp = McpServer::GetInstance();
+
+    mcp.AddTool(
+        "self.lyly_music.server_info",
+        "Return LYLY music server address. Does not play music.",
+        PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            return std::string(LylyMusic::SERVER_URL);
+        }
+    );
+}
 
 public:
     LylyS3Board() :
