@@ -5,6 +5,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "lyly_music_config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
