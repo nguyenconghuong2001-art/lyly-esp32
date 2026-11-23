@@ -175,7 +175,7 @@ bool MusicMp3Decoder::AcceptSample(int16_t sample) {
         const int32_t interpolated = previous_sample_ + static_cast<int32_t>(
             (static_cast<int64_t>(sample - static_cast<int32_t>(previous_sample_)) *
              static_cast<int64_t>(numerator)) / target_rate_);
-        pending_pcm_.push_back(static_cast<int16_t>(std::clamp(interpolated, -32768, 32767)));
+        pending_pcm_.push_back(static_cast<int16_t>(std::clamp<int32_t>(interpolated, -32768, 32767)));
         ++next_output_index_;
         if (pending_pcm_.size() >= max_frame && !FlushPcm()) return false;
     }
