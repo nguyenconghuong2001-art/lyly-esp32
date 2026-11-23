@@ -71,6 +71,7 @@ if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
 
 elseif(CONFIG_BOARD_TYPE_LYLY_S3)
     set(BOARD_TYPE "lyly-s3")
+    list(APPEND INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/boards/lyly-s3")
     list(APPEND SOURCES "audio/music_mp3_decoder.cc")
     list(APPEND SOURCES "audio/music_mp3_streamer.cc")
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
