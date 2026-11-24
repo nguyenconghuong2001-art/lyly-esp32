@@ -1,6 +1,7 @@
 #ifndef LYLY_MUSIC_MP3_DECODER_H
 #define LYLY_MUSIC_MP3_DECODER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -12,7 +13,8 @@ class AudioService;
 // Must be driven from a worker task, not the main application/event loop.
 class MusicMp3Decoder {
 public:
-    MusicMp3Decoder(AudioService& audio, int output_sample_rate);
+    MusicMp3Decoder(AudioService& audio, int output_sample_rate,
+                    const std::atomic<bool>* cancel = nullptr);
     ~MusicMp3Decoder();
 
     MusicMp3Decoder(const MusicMp3Decoder&) = delete;
@@ -32,6 +34,7 @@ private:
 
     AudioService& audio_;
     int target_rate_;
+    const std::atomic<bool>* cancel_;
     void* decoder_ = nullptr;
     std::vector<uint8_t> output_buffer_;
     std::vector<int16_t> pending_pcm_;

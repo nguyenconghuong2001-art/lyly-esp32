@@ -16,12 +16,13 @@ namespace {
 constexpr char TAG[] = "LYLY_MP3";
 constexpr size_t kInitialPcmBuffer = 8192;
 constexpr size_t kMaximumPcmBuffer = 32768;
-constexpr int kQueueRetryCount = 25;     // Bounded backpressure: 250 ms maximum.
+constexpr TickType_t kQueueWaitTimeout = pdMS_TO_TICKS(30000);
 constexpr TickType_t kQueueRetryTicks = pdMS_TO_TICKS(10) > 0 ? pdMS_TO_TICKS(10) : 1;
 }
 
-MusicMp3Decoder::MusicMp3Decoder(AudioService& audio, int output_sample_rate)
-    : audio_(audio), target_rate_(output_sample_rate) {}
+MusicMp3Decoder::MusicMp3Decoder(AudioService& audio, int output_sample_rate,
+                                 const std::atomic<bool>* cancel)
+    : audio_(audio), target_rate_(output_sample_rate), cancel_(cancel) {}
 
 MusicMp3Decoder::~MusicMp3Decoder() { Close(); }
 
@@ -186,16 +187,28 @@ bool MusicMp3Decoder::AcceptSample(int16_t sample) {
 bool MusicMp3Decoder::FlushPcm() {
     if (pending_pcm_.empty()) return true;
     // AudioService enforces voice priority and its own queue capacity.
-    // Do not wait forever when the assistant begins speaking.
-    for (int attempt = 0; attempt < kQueueRetryCount; ++attempt) {
+    // QueueMusicPcm only moves the vector on success; rejected PCM stays intact.
+    const TickType_t started = xTaskGetTickCount();
+    bool waiting = false;
+    while (true) {
+        if (cancel_ && cancel_->load()) return false;
         if (audio_.QueueMusicPcm(std::move(pending_pcm_), target_rate_)) {
             pending_pcm_.clear();
+            if (waiting) ESP_LOGI(TAG, "Music queue resumed");
             return true;
+        }
+        const TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= kQueueWaitTimeout) {
+            ESP_LOGW(TAG, "Music queue timeout after 30 s");
+            return false;
+        }
+        // Avoid logging for ordinary brief queue backpressure.
+        if (!waiting && elapsed >= pdMS_TO_TICKS(1000)) {
+            waiting = true;
+            ESP_LOGI(TAG, "Music queue waiting for audio output");
         }
         vTaskDelay(kQueueRetryTicks);
     }
-    ESP_LOGW(TAG, "Music queue paused too long; cancel this stream");
-    return false;
 }
 
 bool MusicMp3Decoder::Finish() {

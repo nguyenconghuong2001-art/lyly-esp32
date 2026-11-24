@@ -129,7 +129,7 @@ void MusicMp3Streamer::Worker() {
         }
 
         MusicMp3Decoder decoder(Application::GetInstance().GetAudioService(),
-                                codec->output_sample_rate());
+                                codec->output_sample_rate(), &cancel_);
         if (!decoder.Open()) {
             ESP_LOGE(TAG, "Decoder open failed");
             http->Close();
@@ -159,9 +159,11 @@ void MusicMp3Streamer::Worker() {
                 }
                 received += chunk_bytes;
                 if (!decoder.Feed(buffer, chunk_bytes)) {
-                    ESP_LOGE(TAG, "MP3 decoder/feed failed at byte %u",
-                             static_cast<unsigned>(received));
-                    failed = true;
+                    if (!cancel_.load()) {
+                        ESP_LOGE(TAG, "MP3 decoder/feed failed at byte %u",
+                                 static_cast<unsigned>(received));
+                        failed = true;
+                    }
                     break;
                 }
                 if (received - last_logged >= 64U * 1024U) {
@@ -236,7 +238,7 @@ void MusicMp3Streamer::Worker() {
         if (!cancel_.load() && !failed &&
             (expected_bytes == 0 || received == expected_bytes)) {
             completed = decoder.Finish();
-            if (!completed) ESP_LOGE(TAG, "MP3 decoder finish failed");
+            if (!completed && !cancel_.load()) ESP_LOGE(TAG, "MP3 decoder finish failed");
         } else if (!cancel_.load() && !failed) {
             failed = true;
             ESP_LOGE(TAG, "MP3 truncated: received=%u expected=%u",
