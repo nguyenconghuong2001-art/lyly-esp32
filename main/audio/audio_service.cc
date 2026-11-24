@@ -421,8 +421,7 @@ bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
         sample_rate != codec_->output_sample_rate() ||
         pcm.size() > static_cast<size_t>(sample_rate) * OPUS_FRAME_DURATION_MS / 1000 ||
         !audio_decode_queue_.empty() ||
-        audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE ||
-        (xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
+        audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE) {
         return false;
     }
 
