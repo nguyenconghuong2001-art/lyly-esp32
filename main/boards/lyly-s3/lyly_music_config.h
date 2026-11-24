@@ -8,6 +8,6 @@ inline constexpr char SERVER_URL[] =
 
 inline constexpr char SEARCH_API[] = "/song?song=";
 
-inline constexpr char STREAM_API[] = "/stream?id=";
+inline constexpr char STREAM_API[] = "/media/";
 
 }

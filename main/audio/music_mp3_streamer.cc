@@ -80,7 +80,7 @@ void MusicMp3Streamer::Worker() {
         }
         // Only the configured LYLY music host is permitted.
         const std::string url = std::string(LylyMusic::SERVER_URL) +
-                                LylyMusic::STREAM_API + song_id_;
+                                LylyMusic::STREAM_API + song_id_ + ".mp3";
         http->SetHeader("Accept", "audio/mpeg");
         if (!http->Open("GET", url)) {
             ESP_LOGE(TAG, "Could not open music stream");
