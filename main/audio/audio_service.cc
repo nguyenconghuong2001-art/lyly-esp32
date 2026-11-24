@@ -17,6 +17,11 @@
 
 #define TAG "AudioService"
 
+namespace {
+constexpr size_t kMusicQueueCapacity = 8;
+constexpr size_t kMusicPrebufferFrames = 6;
+}
+
 
 AudioService::AudioService() {
     event_group_ = xEventGroupCreate();
@@ -128,6 +133,9 @@ void AudioService::Stop() {
     audio_encode_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
+    music_playback_queue_.clear();
+    music_input_open_ = false;
+    music_primed_ = false;
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
 }
@@ -259,13 +267,30 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        audio_queue_cv_.wait(lock, [this]() {
+            return service_stopped_ || !audio_playback_queue_.empty() ||
+                (!voice_decode_in_progress_ && audio_decode_queue_.empty() &&
+                 !music_playback_queue_.empty() &&
+                 (music_primed_ || !music_input_open_ ||
+                  music_playback_queue_.size() >= kMusicPrebufferFrames));
+        });
         if (service_stopped_) {
             break;
         }
 
-        auto task = std::move(audio_playback_queue_.front());
-        audio_playback_queue_.pop_front();
+        std::unique_ptr<AudioTask> task;
+        if (!audio_playback_queue_.empty()) {
+            task = std::move(audio_playback_queue_.front());
+            audio_playback_queue_.pop_front();
+        } else {
+            if (!music_primed_) {
+                music_primed_ = true;
+                ESP_LOGI(TAG, "Music prebuffer ready: %u frames",
+                         static_cast<unsigned>(music_playback_queue_.size()));
+            }
+            task = std::move(music_playback_queue_.front());
+            music_playback_queue_.pop_front();
+        }
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -275,6 +300,13 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
         codec_->OutputData(task->pcm);
+        if (task->type == kAudioTaskTypeMusicPlayback) {
+            std::lock_guard<std::mutex> music_lock(audio_queue_mutex_);
+            if (music_input_open_ && music_primed_ && music_playback_queue_.empty()) {
+                music_primed_ = false;
+                ESP_LOGW(TAG, "Music buffer underrun; rebuffering");
+            }
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -308,6 +340,7 @@ void AudioService::OpusCodecTask() {
         if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
+            voice_decode_in_progress_ = true;
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -332,6 +365,8 @@ void AudioService::OpusCodecTask() {
                 ESP_LOGE(TAG, "Failed to decode audio");
                 lock.lock();
             }
+            voice_decode_in_progress_ = false;
+            audio_queue_cv_.notify_all();
             debug_statistics_.decode_count++;
         }
         
@@ -417,39 +452,41 @@ bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
     }
 
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    if (service_stopped_ || codec_ == nullptr ||
+    if (service_stopped_ || !music_input_open_ || codec_ == nullptr ||
         sample_rate != codec_->output_sample_rate() ||
         pcm.size() > static_cast<size_t>(sample_rate) * OPUS_FRAME_DURATION_MS / 1000 ||
-        !audio_decode_queue_.empty() ||
-        audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE) {
+        music_playback_queue_.size() >= kMusicQueueCapacity) {
         return false;
-    }
-
-    // A response from the assistant takes precedence over background music.
-    for (const auto& queued : audio_playback_queue_) {
-        if (queued->type != kAudioTaskTypeMusicPlayback) {
-            return false;
-        }
     }
 
     auto task = std::make_unique<AudioTask>();
     task->type = kAudioTaskTypeMusicPlayback;
     task->pcm = std::move(pcm);
     task->timestamp = 0; // Music is not a server-AEC packet.
-    audio_playback_queue_.push_back(std::move(task));
+    music_playback_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
     return true;
 }
 
+void AudioService::BeginMusicPlayback() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    music_playback_queue_.clear();
+    music_input_open_ = true;
+    music_primed_ = false;
+    audio_queue_cv_.notify_all();
+}
+
+void AudioService::EndMusicPlayback() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    music_input_open_ = false;
+    audio_queue_cv_.notify_all(); // Drain even a short final tail.
+}
+
 void AudioService::ClearMusicPlayback() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    for (auto it = audio_playback_queue_.begin(); it != audio_playback_queue_.end();) {
-        if ((*it)->type == kAudioTaskTypeMusicPlayback) {
-            it = audio_playback_queue_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    music_playback_queue_.clear();
+    music_input_open_ = false;
+    music_primed_ = false;
     audio_queue_cv_.notify_all();
 }
 
@@ -462,14 +499,7 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
             return false;
         }
     }
-    // Drop only queued music frames, never the assistant's decoded voice frames.
-    for (auto it = audio_playback_queue_.begin(); it != audio_playback_queue_.end();) {
-        if ((*it)->type == kAudioTaskTypeMusicPlayback) {
-            it = audio_playback_queue_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // Voice has output priority; retain buffered music instead of discarding it.
     audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;
@@ -673,7 +703,7 @@ void AudioService::PlaySound(const std::string_view& ogg) {
 
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
+    return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && music_playback_queue_.empty() && audio_testing_queue_.empty();
 }
 
 void AudioService::ResetDecoder() {

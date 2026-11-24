@@ -136,6 +136,13 @@ void MusicMp3Streamer::Worker() {
             break;
         }
 
+        auto& audio = Application::GetInstance().GetAudioService();
+        audio.BeginMusicPlayback();
+        if (cancel_.load()) {
+            audio.ClearMusicPlayback();
+            http->Close();
+            break;
+        }
         uint8_t buffer[kReadBytes];
         size_t last_logged = 0;
         while (!cancel_.load()) {
@@ -246,6 +253,11 @@ void MusicMp3Streamer::Worker() {
         }
         http->Close();
         decoder.Close();
+        if (completed && !cancel_.load()) {
+            audio.EndMusicPlayback();
+        } else {
+            audio.ClearMusicPlayback();
+        }
     } while (false);
 
     if (cancel_.load()) {

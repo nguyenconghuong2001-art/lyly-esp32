@@ -107,6 +107,8 @@ public:
     // 16-bit mono PCM, already resampled to the codec output rate.
     // Nonblocking: caller handles false by retrying or skipping a frame.
     bool QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate);
+    void BeginMusicPlayback();
+    void EndMusicPlayback();
     void ClearMusicPlayback(); // Remove queued music only; retain AI speech.
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
@@ -142,6 +144,11 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    // Separate bounded music queue; all state protected by audio_queue_mutex_.
+    std::deque<std::unique_ptr<AudioTask>> music_playback_queue_;
+    bool music_input_open_ = false;
+    bool music_primed_ = false;
+    bool voice_decode_in_progress_ = false;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
