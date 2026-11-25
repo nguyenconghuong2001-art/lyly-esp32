@@ -81,6 +81,24 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
 
+    // LYLY V2.3G: Tune only the Hi Lily model; leave other models unchanged.
+    if (afe_data_ != nullptr && wakenet_model_ != nullptr &&
+        std::string(wakenet_model_) == "wn9_hilili_tts") {
+        constexpr float kLylyWakeThreshold = 0.58f;
+        if (afe_iface_->set_wakenet_threshold != nullptr) {
+            const int ret = afe_iface_->set_wakenet_threshold(
+                afe_data_, 1, kLylyWakeThreshold);
+            if (ret == 1) {
+                ESP_LOGI(TAG, "LYLY V2.3G WakeNet threshold=%.2f result=%d",
+                         static_cast<double>(kLylyWakeThreshold), ret);
+            } else {
+                ESP_LOGW(TAG, "LYLY V2.3G WakeNet threshold rejected, result=%d", ret);
+            }
+        } else {
+            ESP_LOGW(TAG, "LYLY V2.3G WakeNet threshold API unavailable");
+        }
+    }
+
     xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
