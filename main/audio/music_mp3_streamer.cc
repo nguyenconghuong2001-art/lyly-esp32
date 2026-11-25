@@ -6,6 +6,8 @@
 #include "board.h"
 #include "lyly_music_config.h"
 
+#include <algorithm>
+#include <cstring>
 #include <cctype>
 #include <cstdint>
 #include <memory>
@@ -13,6 +15,7 @@
 #include <utility>
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -22,6 +25,79 @@ constexpr size_t kReadBytes = 4096;
 constexpr size_t kMaxStreamBytes = 32U * 1024U * 1024U;
 constexpr uint32_t kWorkerStackBytes = 12288;
 constexpr int kMaxResumeAttempts = 3;
+constexpr size_t kCacheBytes = 256U * 1024U;
+constexpr size_t kCacheStartBytes = 48U * 1024U;
+constexpr TickType_t kCachePollTicks = pdMS_TO_TICKS(10) > 0 ? pdMS_TO_TICKS(10) : 1;
+
+// Single producer (HTTP) and single consumer (MP3 decoder). The monotonic
+// positions publish copies only after they finish. Streams are limited to 32 MB,
+// so positions cannot wrap on ESP32. The backing store is PSRAM, not DMA memory.
+struct Mp3Cache {
+    uint8_t* bytes;
+    MusicMp3Decoder& decoder;
+    std::atomic<bool>& abort;
+    std::atomic<size_t> written{0};
+    std::atomic<size_t> read{0};
+    std::atomic<bool> input_done{false};
+    std::atomic<bool> done{false};
+    bool success = false; // read by producer only after done.load()
+
+    size_t Available() const { const size_t r = read.load(); return written.load() - r; }
+
+    bool Push(const uint8_t* src, size_t count) {
+        while (count && !abort.load() && !done.load()) {
+            const size_t w = written.load();
+            const size_t space = kCacheBytes - (w - read.load());
+            const size_t offset = w % kCacheBytes;
+            const size_t n = std::min({count, space, kCacheBytes - offset});
+            if (!n) { vTaskDelay(kCachePollTicks); continue; }
+            std::memcpy(bytes + offset, src, n);
+            written.store(w + n);
+            src += n;
+            count -= n;
+        }
+        return count == 0 && !abort.load() && !done.load();
+    }
+
+    static void DecodeEntry(void* arg) {
+        auto& c = *static_cast<Mp3Cache*>(arg);
+        c.Decode();
+        c.done.store(true); // last access to the producer-owned context
+        vTaskDelete(nullptr);
+    }
+
+    void Decode() {
+        uint8_t chunk[kReadBytes];
+        while (!abort.load() && !input_done.load() && Available() < kCacheStartBytes) {
+            vTaskDelay(kCachePollTicks);
+        }
+        if (abort.load()) return;
+        ESP_LOGI(TAG, "MP3 PSRAM prebuffer ready: %u bytes", static_cast<unsigned>(Available()));
+        while (!abort.load()) {
+            const size_t r = read.load();
+            const size_t available = written.load() - r;
+            if (!available) {
+                if (input_done.load()) {
+                    // Reload after observing EOF: the last publish may race the earlier read.
+                    if (written.load() != r) continue;
+                    success = decoder.Finish();
+                    return;
+                }
+                vTaskDelay(kCachePollTicks);
+                continue;
+            }
+            const size_t offset = r % kCacheBytes;
+            const size_t n = std::min({available, sizeof(chunk), kCacheBytes - offset});
+            std::memcpy(chunk, bytes + offset, n);
+            read.store(r + n);
+            if (!decoder.Feed(chunk, n)) {
+                if (!abort.load()) ESP_LOGE(TAG, "MP3 cache decoder/feed failed");
+                return;
+            }
+        }
+    }
+};
+
 
 // Never forward arbitrary model-provided URLs to the network stack.
 // Only song IDs from the configured LYLY music service are accepted.
@@ -48,6 +124,7 @@ bool MusicMp3Streamer::PlaySongId(const std::string& song_id) {
     if (!running_.compare_exchange_strong(expected, true)) return false;
 
     cancel_.store(false);
+    stream_abort_.store(false);
     song_id_ = song_id;
     if (xTaskCreate(WorkerEntry, "lyly_mp3", kWorkerStackBytes, this, 3, nullptr) != pdPASS) {
         running_.store(false);
@@ -60,6 +137,7 @@ bool MusicMp3Streamer::PlaySongId(const std::string& song_id) {
 
 void MusicMp3Streamer::Stop() {
     cancel_.store(true);
+    stream_abort_.store(true);
     Application::GetInstance().GetAudioService().ClearMusicPlayback();
 }
 
@@ -133,7 +211,7 @@ void MusicMp3Streamer::Worker() {
         }
 
         MusicMp3Decoder decoder(Application::GetInstance().GetAudioService(),
-                                codec->output_sample_rate(), &cancel_);
+                                codec->output_sample_rate(), &stream_abort_);
         if (!decoder.Open()) {
             ESP_LOGE(TAG, "Decoder open failed");
             http->Close();
@@ -147,9 +225,27 @@ void MusicMp3Streamer::Worker() {
             http->Close();
             break;
         }
+        uint8_t* cache_bytes = nullptr;
+        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 64U * 1024U &&
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 16U * 1024U) {
+            cache_bytes = static_cast<uint8_t*>(heap_caps_malloc(kCacheBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        }
+        Mp3Cache cache{cache_bytes, decoder, stream_abort_};
+        bool cached = false;
+        if (cache_bytes) {
+            cached = xTaskCreate(Mp3Cache::DecodeEntry, "lyly_mp3_dec", kWorkerStackBytes,
+                                 &cache, 3, nullptr) == pdPASS;
+            if (!cached) { heap_caps_free(cache_bytes); cache_bytes = nullptr; }
+        }
+        if (cached) {
+            ESP_LOGI(TAG, "MP3 PSRAM cache enabled: %u bytes", static_cast<unsigned>(kCacheBytes));
+        } else {
+            ESP_LOGW(TAG, "MP3 cache unavailable; using direct decoder");
+        }
         uint8_t buffer[kReadBytes];
         size_t last_logged = 0;
         while (!cancel_.load()) {
+            if (cached && cache.done.load()) { failed = true; break; }
             // This check avoids waiting for EOF if all advertised bytes arrived.
             if (expected_bytes > 0 && received == expected_bytes) {
                 ESP_LOGI(TAG, "Received full MP3 body (%u bytes)",
@@ -169,7 +265,7 @@ void MusicMp3Streamer::Worker() {
                     break;
                 }
                 received += chunk_bytes;
-                if (!decoder.Feed(buffer, chunk_bytes)) {
+                if (!(cached ? cache.Push(buffer, chunk_bytes) : decoder.Feed(buffer, chunk_bytes))) {
                     if (!cancel_.load()) {
                         ESP_LOGE(TAG, "MP3 decoder/feed failed at byte %u",
                                  static_cast<unsigned>(received));
@@ -180,6 +276,8 @@ void MusicMp3Streamer::Worker() {
                 if (received - last_logged >= 64U * 1024U) {
                     ESP_LOGI(TAG, "MP3 progress received=%u expected=%u",
                              static_cast<unsigned>(received), static_cast<unsigned>(expected_bytes));
+                    if (cached) ESP_LOGI(TAG, "MP3 PSRAM queued=%u bytes",
+                                         static_cast<unsigned>(cache.Available()));
                     last_logged = received;
                 }
                 continue;
@@ -246,8 +344,18 @@ void MusicMp3Streamer::Worker() {
             }
         }
 
-        if (!cancel_.load() && !failed &&
-            (expected_bytes == 0 || received == expected_bytes)) {
+        const bool body_complete = !cancel_.load() && !failed &&
+                                   (expected_bytes == 0 || received == expected_bytes);
+        if (cached) {
+            if (!body_complete) stream_abort_.store(true);
+            cache.input_done.store(true);
+            http->Close();
+            // The decoder may still be draining the cached MP3. Do not free
+            // its context or release the playback slot until it has exited.
+            while (!cache.done.load()) vTaskDelay(kCachePollTicks);
+            completed = body_complete && !cancel_.load() && cache.success;
+            heap_caps_free(cache_bytes);
+        } else if (body_complete) {
             completed = decoder.Finish();
             if (!completed && !cancel_.load()) ESP_LOGE(TAG, "MP3 decoder finish failed");
         } else if (!cancel_.load() && !failed) {
@@ -255,7 +363,7 @@ void MusicMp3Streamer::Worker() {
             ESP_LOGE(TAG, "MP3 truncated: received=%u expected=%u",
                      static_cast<unsigned>(received), static_cast<unsigned>(expected_bytes));
         }
-        http->Close();
+        if (!cached) http->Close();
         decoder.Close();
         if (completed && !cancel_.load()) {
             audio.EndMusicPlayback();

@@ -26,6 +26,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> cancel_{false};
+    std::atomic<bool> stream_abort_{false}; // also stops decoder on transport failure
     std::string song_id_; // Owned by worker while running_. Never change concurrently.
 };
 
