@@ -14,6 +14,7 @@
 #include "assets/lang_config.h"
 
 #include <wifi_station.h>
+#include <mutex>
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
@@ -35,6 +36,9 @@ private:
     Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
+    std::mutex music_power_mutex_;
+    bool requested_power_save_ = true;
+    bool music_streaming_ = false;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -221,6 +225,22 @@ public:
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+    }
+
+    // Preserve the last power policy requested by the AI session, but do not
+    // allow the session-closing callback to enable Wi-Fi PS mid-stream.
+    void SetPowerSaveMode(bool enabled) override {
+        std::lock_guard<std::mutex> lock(music_power_mutex_);
+        requested_power_save_ = enabled;
+        WifiBoard::SetPowerSaveMode(enabled && !music_streaming_);
+    }
+
+    void SetMusicStreamingMode(bool enabled) override {
+        std::lock_guard<std::mutex> lock(music_power_mutex_);
+        music_streaming_ = enabled;
+        WifiBoard::SetPowerSaveMode(requested_power_save_ && !music_streaming_);
+        ESP_LOGI(TAG, "LYLY music WiFi PS policy: %s",
+                 requested_power_save_ && !music_streaming_ ? "on" : "off");
     }
 
     virtual Led* GetLed() override {

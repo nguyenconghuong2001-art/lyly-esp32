@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <esp_heap_caps.h>
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -20,6 +21,8 @@
 namespace {
 constexpr size_t kMusicQueueCapacity = 8;
 constexpr size_t kMusicPrebufferFrames = 6;
+constexpr size_t kMusicLargeQueueCapacity = 24;
+constexpr size_t kMusicLargePrebufferFrames = 20;
 }
 
 
@@ -272,7 +275,7 @@ void AudioService::AudioOutputTask() {
                 (!voice_decode_in_progress_ && audio_decode_queue_.empty() &&
                  !music_playback_queue_.empty() &&
                  (music_primed_ || !music_input_open_ ||
-                  music_playback_queue_.size() >= kMusicPrebufferFrames));
+                  music_playback_queue_.size() >= music_prebuffer_frames_));
         });
         if (service_stopped_) {
             break;
@@ -455,7 +458,7 @@ bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
     if (service_stopped_ || !music_input_open_ || codec_ == nullptr ||
         sample_rate != codec_->output_sample_rate() ||
         pcm.size() > static_cast<size_t>(sample_rate) * OPUS_FRAME_DURATION_MS / 1000 ||
-        music_playback_queue_.size() >= kMusicQueueCapacity) {
+        music_playback_queue_.size() >= music_queue_capacity_) {
         return false;
     }
 
@@ -471,6 +474,24 @@ bool AudioService::QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate) {
 void AudioService::BeginMusicPlayback() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     music_playback_queue_.clear();
+    music_queue_capacity_ = kMusicQueueCapacity;
+    music_prebuffer_frames_ = kMusicPrebufferFrames;
+#if defined(CONFIG_SPIRAM_USE_MALLOC) && CONFIG_SPIRAM_USE_MALLOC && defined(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL)
+    // The decoder allocates PCM vectors through ordinary malloc. Only expand
+    // when the configured allocator prefers PSRAM for these frame allocations.
+    const size_t frame_bytes = codec_ ? static_cast<size_t>(codec_->output_sample_rate()) *
+        OPUS_FRAME_DURATION_MS / 1000 * sizeof(int16_t) : 0;
+    if (frame_bytes > CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL &&
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= 256 * 1024 &&
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) >= 2 * frame_bytes &&
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 64 * 1024) {
+        music_queue_capacity_ = kMusicLargeQueueCapacity;
+        music_prebuffer_frames_ = kMusicLargePrebufferFrames;
+    }
+#endif
+    ESP_LOGI(TAG, "LYLY music queue: capacity=%u prebuffer=%u",
+             static_cast<unsigned>(music_queue_capacity_),
+             static_cast<unsigned>(music_prebuffer_frames_));
     music_input_open_ = true;
     music_primed_ = false;
     audio_queue_cv_.notify_all();

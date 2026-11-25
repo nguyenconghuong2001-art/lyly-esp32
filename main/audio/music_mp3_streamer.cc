@@ -75,6 +75,7 @@ void MusicMp3Streamer::Worker() {
     size_t expected_bytes = 0;
     int resumed_connections = 0;
     const std::string requested_id = song_id_;
+    bool music_power_active = false;
 
     do {
         auto& board = Board::GetInstance();
@@ -84,6 +85,9 @@ void MusicMp3Streamer::Worker() {
             ESP_LOGW(TAG, "Cancelled or network/audio codec not ready");
             break;
         }
+
+        board.SetMusicStreamingMode(true);
+        music_power_active = true;
 
         // Preserve the existing server, endpoint and song-ID trust boundary.
         const std::string url = std::string(LylyMusic::SERVER_URL) +
@@ -273,6 +277,7 @@ void MusicMp3Streamer::Worker() {
                  requested_id.c_str(), static_cast<unsigned>(received),
                  static_cast<unsigned>(expected_bytes), resumed_connections);
     }
+    if (music_power_active) Board::GetInstance().SetMusicStreamingMode(false);
     song_id_.clear();
     running_.store(false);
 }

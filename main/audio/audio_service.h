@@ -146,6 +146,8 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     // Separate bounded music queue; all state protected by audio_queue_mutex_.
     std::deque<std::unique_ptr<AudioTask>> music_playback_queue_;
+    size_t music_queue_capacity_ = 8;
+    size_t music_prebuffer_frames_ = 6;
     bool music_input_open_ = false;
     bool music_primed_ = false;
     bool voice_decode_in_progress_ = false;
