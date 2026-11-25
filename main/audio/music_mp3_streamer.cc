@@ -15,6 +15,8 @@
 #include <utility>
 
 #include <esp_log.h>
+#include <esp_random.h>
+#include <cJSON.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -120,25 +122,116 @@ MusicMp3Streamer& MusicMp3Streamer::Instance() {
 
 bool MusicMp3Streamer::PlaySongId(const std::string& song_id) {
     if (!ValidSongId(song_id)) return false;
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true)) return false;
+    return StartList({song_id});
+}
 
-    cancel_.store(false);
-    stream_abort_.store(false);
-    song_id_ = song_id;
+bool MusicMp3Streamer::PlayAll(bool shuffle) {
+    auto* network = Board::GetInstance().GetNetwork();
+    if (!network) return false;
+    auto http = network->CreateHttp(0);
+    if (!http) return false;
+    if (!http->Open("GET", std::string(LylyMusic::SERVER_URL) + "/songs")) {
+        http->Close();
+        return false;
+    }
+    constexpr size_t kCatalogLimit = 64U * 1024U;
+    std::string body;
+    const size_t expected = http->GetBodyLength();
+    bool ok = http->GetStatusCode() == 200 && expected <= kCatalogLimit;
+    char chunk[1024];
+    while (ok && (!expected || body.size() < expected)) {
+        const int n = http->Read(chunk, sizeof(chunk));
+        if (n == 0) break;
+        if (n < 0 || body.size() + static_cast<size_t>(n) > kCatalogLimit) {
+            ok = false;
+            break;
+        }
+        body.append(chunk, static_cast<size_t>(n));
+    }
+    if (expected && body.size() != expected) ok = false;
+    http->Close();
+    if (!ok) return false;
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_Parse(body.c_str()), cJSON_Delete);
+    if (!root || !cJSON_IsArray(root.get())) return false;
+    std::vector<std::string> ids;
+    cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, root.get()) {
+        const auto* id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        if (!cJSON_IsString(id) || !id->valuestring) return false;
+        std::string value(id->valuestring);
+        if (value == "lyly-test") continue; // Keep the speaker test out of playlists.
+        if (!ValidSongId(value)) return false;
+        if (std::find(ids.begin(), ids.end(), value) == ids.end()) ids.push_back(std::move(value));
+        if (ids.size() > 500) return false;
+    }
+    root.reset();
+    if (shuffle) {
+        for (size_t i = ids.size(); i > 1; --i) {
+            std::swap(ids[i - 1], ids[esp_random() % i]);
+        }
+    }
+    ESP_LOGI(TAG, "LYLY playlist loaded: %u songs, shuffle=%d", static_cast<unsigned>(ids.size()), shuffle);
+    return StartList(std::move(ids));
+}
+
+bool MusicMp3Streamer::StartList(std::vector<std::string> ids) {
+    if (ids.empty()) return false;
+    std::lock_guard<std::mutex> lock(playlist_mutex_);
+    playlist_ = std::move(ids);
+    playlist_index_ = 0;
+    restart_pending_ = true;
+    if (running_.load()) {
+        InterruptLocked();
+        return true;
+    }
+    running_.store(true);
     if (xTaskCreate(WorkerEntry, "lyly_mp3", kWorkerStackBytes, this, 3, nullptr) != pdPASS) {
+        playlist_.clear();
+        restart_pending_ = false;
         running_.store(false);
-        song_id_.clear();
         ESP_LOGE(TAG, "Unable to create streaming task");
         return false;
     }
     return true;
 }
 
-void MusicMp3Streamer::Stop() {
+void MusicMp3Streamer::InterruptLocked() {
     cancel_.store(true);
     stream_abort_.store(true);
     Application::GetInstance().GetAudioService().ClearMusicPlayback();
+}
+
+bool MusicMp3Streamer::Next() {
+    std::lock_guard<std::mutex> lock(playlist_mutex_);
+    if (!running_.load() || playlist_.empty() || playlist_index_ + 1 >= playlist_.size()) return false;
+    ++playlist_index_;
+    restart_pending_ = true;
+    InterruptLocked();
+    return true;
+}
+
+bool MusicMp3Streamer::Previous() {
+    std::lock_guard<std::mutex> lock(playlist_mutex_);
+    if (!running_.load() || playlist_.empty() || playlist_index_ == 0) return false;
+    --playlist_index_;
+    restart_pending_ = true;
+    InterruptLocked();
+    return true;
+}
+
+bool MusicMp3Streamer::Repeat() {
+    std::lock_guard<std::mutex> lock(playlist_mutex_);
+    if (!running_.load() || playlist_.empty()) return false;
+    restart_pending_ = true;
+    InterruptLocked();
+    return true;
+}
+
+void MusicMp3Streamer::Stop() {
+    std::lock_guard<std::mutex> lock(playlist_mutex_);
+    playlist_.clear();
+    restart_pending_ = false;
+    InterruptLocked();
 }
 
 void MusicMp3Streamer::WorkerEntry(void* context) {
@@ -147,12 +240,44 @@ void MusicMp3Streamer::WorkerEntry(void* context) {
 }
 
 void MusicMp3Streamer::Worker() {
+    while (true) {
+        std::string id;
+        {
+            std::lock_guard<std::mutex> lock(playlist_mutex_);
+            if (playlist_.empty() || playlist_index_ >= playlist_.size()) {
+                playlist_.clear();
+                running_.store(false);
+                return;
+            }
+            id = playlist_[playlist_index_];
+            restart_pending_ = false;
+            cancel_.store(false);
+            stream_abort_.store(false);
+            ESP_LOGI(TAG, "LYLY playlist track %u/%u: %s", static_cast<unsigned>(playlist_index_ + 1),
+                     static_cast<unsigned>(playlist_.size()), id.c_str());
+        }
+        const bool complete = StreamOne(id);
+        // StreamOne ends when the decoder has finished, not when the final PCM
+        // frame reaches the output. Drain that tail before starting a new track.
+        auto& audio = Application::GetInstance().GetAudioService();
+        while (complete && !cancel_.load() && !audio.IsMusicDrained()) {
+            vTaskDelay(kCachePollTicks);
+        }
+        {
+            std::lock_guard<std::mutex> lock(playlist_mutex_);
+            if (restart_pending_) continue; // A newer user command wins.
+            if (complete && !cancel_.load() && !playlist_.empty()) ++playlist_index_;
+            else playlist_.clear(); // Stop on transport/decode failure, do not loop.
+        }
+    }
+}
+
+bool MusicMp3Streamer::StreamOne(const std::string& requested_id) {
     bool completed = false;
     bool failed = false;
     size_t received = 0;
     size_t expected_bytes = 0;
     int resumed_connections = 0;
-    const std::string requested_id = song_id_;
     bool music_power_active = false;
 
     do {
@@ -386,6 +511,5 @@ void MusicMp3Streamer::Worker() {
                  static_cast<unsigned>(expected_bytes), resumed_connections);
     }
     if (music_power_active) Board::GetInstance().SetMusicStreamingMode(false);
-    song_id_.clear();
-    running_.store(false);
+    return completed && !cancel_.load();
 }

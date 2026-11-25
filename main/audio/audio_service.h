@@ -109,6 +109,7 @@ public:
     bool QueueMusicPcm(std::vector<int16_t>&& pcm, int sample_rate);
     void BeginMusicPlayback();
     void EndMusicPlayback();
+    bool IsMusicDrained();
     void ClearMusicPlayback(); // Remove queued music only; retain AI speech.
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
@@ -150,6 +151,7 @@ private:
     size_t music_prebuffer_frames_ = 6;
     bool music_input_open_ = false;
     bool music_primed_ = false;
+    bool music_output_in_progress_ = false;
     bool voice_decode_in_progress_ = false;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;

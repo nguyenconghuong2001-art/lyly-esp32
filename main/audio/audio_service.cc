@@ -293,6 +293,7 @@ void AudioService::AudioOutputTask() {
             }
             task = std::move(music_playback_queue_.front());
             music_playback_queue_.pop_front();
+            music_output_in_progress_ = true;
         }
         audio_queue_cv_.notify_all();
         lock.unlock();
@@ -305,6 +306,7 @@ void AudioService::AudioOutputTask() {
         codec_->OutputData(task->pcm);
         if (task->type == kAudioTaskTypeMusicPlayback) {
             std::lock_guard<std::mutex> music_lock(audio_queue_mutex_);
+            music_output_in_progress_ = false;
             if (music_input_open_ && music_primed_ && music_playback_queue_.empty()) {
                 music_primed_ = false;
                 ESP_LOGW(TAG, "Music buffer underrun; rebuffering");
@@ -501,6 +503,11 @@ void AudioService::EndMusicPlayback() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     music_input_open_ = false;
     audio_queue_cv_.notify_all(); // Drain even a short final tail.
+}
+
+bool AudioService::IsMusicDrained() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return music_playback_queue_.empty() && !music_output_in_progress_;
 }
 
 void AudioService::ClearMusicPlayback() {

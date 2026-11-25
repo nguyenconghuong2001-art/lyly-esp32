@@ -191,7 +191,7 @@ void InitializeTools() {
     mcp.AddTool(
         "self.lyly_music.play",
         "Play a song on LYLY speaker. First call self.lyly_music.search, "
-        "then pass the returned song ID. Starts streaming asynchronously.",
+        "then pass the returned song ID. Replaces the current playlist and plays only that song.",
         PropertyList({
             Property("id", kPropertyTypeString)
         }),
@@ -199,13 +199,44 @@ void InitializeTools() {
             const auto id = properties["id"].value<std::string>();
             return MusicMp3Streamer::Instance().PlaySongId(id)
                 ? std::string(R"({"success":true,"status":"starting"})")
-                : std::string(R"({"success":false,"error":"Invalid song ID or player busy"})");
+                : std::string(R"({"success":false,"error":"Invalid song ID or could not start player"})");
+        }
+    );
+
+    mcp.AddTool(
+        "self.lyly_music.play_all",
+        "Play all songs in the LYLY music catalog in sequence (phat tat ca, phat nhac lien tuc). "
+        "Automatically advances after each song. Set shuffle=true for random order (phat nhac ngau nhien). "
+        "For a specific requested song, use search then play instead.",
+        PropertyList({Property("shuffle", kPropertyTypeBoolean, false)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            return MusicMp3Streamer::Instance().PlayAll(properties["shuffle"].value<bool>())
+                ? std::string(R"({"success":true,"status":"playlist starting"})")
+                : std::string(R"({"success":false,"error":"Cannot load or start playlist"})");
+        }
+    );
+    mcp.AddTool(
+        "self.lyly_music.next", "Play the next track in the active playlist (bai tiep theo, chuyen bai).",
+        PropertyList(), [](const PropertyList&) -> ReturnValue {
+            return MusicMp3Streamer::Instance().Next();
+        }
+    );
+    mcp.AddTool(
+        "self.lyly_music.previous", "Play the previous track in the active playlist (bai truoc).",
+        PropertyList(), [](const PropertyList&) -> ReturnValue {
+            return MusicMp3Streamer::Instance().Previous();
+        }
+    );
+    mcp.AddTool(
+        "self.lyly_music.repeat", "Restart the current song once (phat lai bai nay). Not endless repeat.",
+        PropertyList(), [](const PropertyList&) -> ReturnValue {
+            return MusicMp3Streamer::Instance().Repeat();
         }
     );
 
     mcp.AddTool(
         "self.lyly_music.stop",
-        "Stop LYLY music playback without discarding the assistant's voice messages.",
+        "Stop LYLY music and cancel the remaining playlist without discarding the assistant's voice messages.",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
             MusicMp3Streamer::Instance().Stop();
